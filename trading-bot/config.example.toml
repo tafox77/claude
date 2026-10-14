@@ -1,0 +1,85 @@
+# Copy to config.toml and edit.  cp config.example.toml config.toml
+#
+# "paper" trades with simulated money against real live prices.
+# "live" places REAL orders. It also requires API keys in the environment and the
+# --confirm-live flag. Backtest and paper trade any config before going live.
+mode = "paper"
+
+exchange = "kraken"          # any ccxt exchange id: kraken, coinbase, binanceus, okx, ...
+quote = "USD"                # all symbols below must be quoted in this currency
+timeframe = "15m"            # candle size the strategies trade on
+poll_seconds = 60            # how often to check prices / stops
+history_bars = 200           # candles fed to each strategy
+
+starting_cash = 1000.0       # paper and backtest only
+fee_rate = 0.0026            # paper and backtest fee per fill (Kraken taker is about 0.26%)
+slippage_pct = 0.001         # paper and backtest slippage per fill
+
+db_path = "cryptobot.db"
+notify_webhook_url = ""      # optional Discord or Slack webhook for trade alerts
+
+[risk]
+max_open_positions = 4
+max_daily_loss_pct = 0.05    # kill switch: no new entries after losing 5% in a UTC day
+min_order_usd = 10.0
+max_order_usd = 250.0        # hard cap on any single buy, whatever the allocation says
+
+# Default parameters per strategy. Each asset can override them with `params = { ... }`.
+[strategies.trend]
+fast = 12
+slow = 26
+rsi_period = 14
+rsi_max = 70                 # don't buy into an overbought market
+
+[strategies.meme_momentum]
+lookback = 20                # breakout above the highest high of the last N candles
+volume_mult = 2.5            # ...on at least 2.5x the average volume
+exit_ema = 9                 # exit when the close drops below this EMA
+rsi_period = 14
+rsi_entry_max = 85
+rsi_exit = 90                # sell into blow-off tops
+
+# ---- Assets ---------------------------------------------------------------------------
+# allocation_pct is the share of total equity put into one position. The sum must be <= 1.
+# Meme coins get small allocations and wide stops because they move 10-50% in hours.
+
+[[assets]]
+symbol = "BTC/USD"
+strategy = "trend"
+allocation_pct = 0.40
+stop_loss_pct = 0.04
+take_profit_pct = 0.12
+trailing_stop_pct = 0.03
+
+[[assets]]
+symbol = "DOGE/USD"
+strategy = "meme_momentum"
+allocation_pct = 0.10
+stop_loss_pct = 0.08
+take_profit_pct = 0.30
+trailing_stop_pct = 0.10
+
+[[assets]]
+symbol = "PEPE/USD"
+strategy = "meme_momentum"
+allocation_pct = 0.08
+stop_loss_pct = 0.10
+take_profit_pct = 0.40
+trailing_stop_pct = 0.12
+
+[[assets]]
+symbol = "WIF/USD"
+strategy = "meme_momentum"
+allocation_pct = 0.08
+stop_loss_pct = 0.10
+take_profit_pct = 0.40
+trailing_stop_pct = 0.12
+
+[[assets]]
+symbol = "BONK/USD"
+strategy = "meme_momentum"
+allocation_pct = 0.08
+stop_loss_pct = 0.10
+take_profit_pct = 0.40
+trailing_stop_pct = 0.12
+params = { volume_mult = 3.0 }   # example per-asset override
