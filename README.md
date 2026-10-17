@@ -2,6 +2,8 @@
 
 Get Claude Code running in your terminal, plus a starter config you can copy into any project.
 
+This repo also contains [`cryptobot`](cryptobot/README.md), a crypto trading bot with online learning and scam-token screening.
+
 ## 1. Install
 
 **macOS / Linux / WSL**

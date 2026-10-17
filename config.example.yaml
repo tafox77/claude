@@ -1,0 +1,27 @@
+# Copy to config.yaml and edit. Every key is optional; defaults are in cryptobot/config.py.
+mode: paper            # paper | live  (live also needs the --i-understand-the-risks flag)
+exchange: binance      # any ccxt exchange id: binance, kraken, coinbase, bybit, ...
+symbols: [BTC/USDT, ETH/USDT, SOL/USDT]
+timeframe: 5m
+starting_cash: 10000
+fee_rate: 0.001
+slippage: 0.0005
+
+# Optional: map a symbol to its token contract to run on-chain scam checks
+# (honeypot, mint/ownership tricks, taxes, LP lock, holder concentration, impersonation).
+token_contracts:
+  PEPE/USDT: {chain: ethereum, address: "0x6982508145454Ce325dDbE47a25d4ec3d2311933"}
+
+risk:
+  risk_per_trade: 0.01
+  max_position_pct: 0.20
+  stop_loss_atr: 2.0
+  take_profit_atr: 3.0
+  max_open_positions: 3
+  max_daily_loss_pct: 0.03
+
+model:
+  horizon_bars: 12
+  entry_threshold: 0.55
+  exit_threshold: 0.35
+  min_train_samples: 500
