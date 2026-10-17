@@ -1,11 +1,19 @@
 # Copy to config.yaml and edit. Every key is optional; defaults are in cryptobot/config.py.
+# Ready-made variants: config.coinbase.example.yaml, config.solana.example.yaml
 mode: paper            # paper | live  (live also needs the --i-understand-the-risks flag)
-exchange: binance      # any ccxt exchange id: binance, kraken, coinbase, bybit, ...
-symbols: [BTC/USDT, ETH/USDT, SOL/USDT]
+venue: cex             # cex = a centralized exchange via ccxt | solana = on-chain via Jupiter
+exchange: binance      # any ccxt exchange id: binance, binanceus, coinbase, kraken, bybit, ...
+symbols: [BTC/USDT, ETH/USDT, SOL/USDT]   # always watched; the first one's quote currency is used by the scanner
 timeframe: 5m
 starting_cash: 10000
 fee_rate: 0.001
 slippage: 0.0005
+
+# Find coins automatically (incl. meme coins). Every coin found must pass the safety screen.
+scan:
+  enabled: false
+  max_symbols: 10      # extra coins watched at once
+  refresh_minutes: 60
 
 # Optional: map a symbol to its token contract to run on-chain scam checks
 # (honeypot, mint/ownership tricks, taxes, LP lock, holder concentration, impersonation).

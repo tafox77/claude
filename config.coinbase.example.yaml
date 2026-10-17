@@ -1,0 +1,14 @@
+# Coinbase (works for US users). Copy to config.yaml.
+mode: paper
+exchange: coinbase
+symbols: [BTC/USD, ETH/USD, SOL/USD]
+# Coinbase fees are high, so use 1-hour candles: on 5-minute candles a typical move is smaller
+# than the round-trip fee and the bot (correctly) finds nothing worth trading.
+timeframe: 1h
+starting_cash: 10000
+fee_rate: 0.006        # set to your Coinbase Advanced taker fee (0.6% or more at low volume tiers)
+slippage: 0.0005
+
+scan:
+  enabled: false       # true = also trade the most active other USD coins on Coinbase
+  max_symbols: 10

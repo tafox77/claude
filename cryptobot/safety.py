@@ -20,7 +20,7 @@ from typing import Any
 
 import requests
 
-from cryptobot.config import SafetyConfig
+from cryptobot.config import Config, SafetyConfig, SolanaConfig
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +71,21 @@ CANONICAL_TOKENS: dict[str, dict[str, str]] = {
         "USDC": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
         "USDT": "0xc2132d05d31c914a87c6611c10748aeb04b58e8f",
         "WETH": "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619",
+    },
+    # Solana addresses are case-sensitive base58, so they're stored exactly.
+    "solana": {
+        "SOL": "So11111111111111111111111111111111111111112",
+        "WSOL": "So11111111111111111111111111111111111111112",
+        "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+        "JUP": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "WIF": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+        "JTO": "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL",
+        "RAY": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+        "PYTH": "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",
+        "MSOL": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+        "JITOSOL": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
     },
 }
 WELL_KNOWN_SYMBOLS = {sym for tokens in CANONICAL_TOKENS.values() for sym in tokens} | {
@@ -165,10 +180,25 @@ def _num(value: Any, default: float = 0.0) -> float:
 Fetch = Callable[[str, dict | None], dict]
 
 
-def http_get_json(url: str, params: dict | None = None) -> dict:
-    resp = requests.get(url, params=params, timeout=15, headers={"Accept": "application/json"})
+def _json_response(resp: requests.Response) -> dict:
+    # A 400 with a JSON body is an answer ("no route", "unknown token"), not an outage.
+    if resp.status_code == 400:
+        try:
+            return resp.json()
+        except ValueError:
+            pass
     resp.raise_for_status()
     return resp.json()
+
+
+def http_get_json(url: str, params: dict | None = None, headers: dict | None = None) -> dict:
+    resp = requests.get(url, params=params, timeout=15, headers={"Accept": "application/json", **(headers or {})})
+    return _json_response(resp)
+
+
+def http_post_json(url: str, body: dict, headers: dict | None = None) -> dict:
+    resp = requests.post(url, json=body, timeout=30, headers={"Accept": "application/json", **(headers or {})})
+    return _json_response(resp)
 
 
 def evaluate_contract(
@@ -256,9 +286,17 @@ def evaluate_contract(
 
 
 def _evaluate_pairs(
-    report: SafetyReport, address: str, pairs: list[dict], cfg: SafetyConfig, now_ms: int | None
+    report: SafetyReport,
+    address: str,
+    pairs: list[dict],
+    cfg: SafetyConfig,
+    now_ms: int | None,
+    case_sensitive: bool = False,
 ) -> None:
-    pairs = [p for p in pairs if str(p.get("baseToken", {}).get("address", "")).lower() == address]
+    def norm(value: str) -> str:
+        return value if case_sensitive else value.lower()
+
+    pairs = [p for p in pairs if norm(str(p.get("baseToken", {}).get("address", ""))) == address]
     if not pairs:
         report.critical.append("No DEX trading pairs found")
         return
@@ -289,21 +327,48 @@ def _evaluate_pairs(
         report.warnings.append("Valuation is >200x pool liquidity; price can't absorb real selling")
 
 
+def resolve_contract(cfg: Config, symbol: str) -> dict[str, str] | None:
+    """The token contract to screen for a symbol, if any."""
+    if symbol in cfg.token_contracts:
+        return cfg.token_contracts[symbol]
+    if cfg.venue == "solana":
+        from cryptobot.solana import solana_mint
+
+        return {"chain": "solana", "address": solana_mint(cfg, symbol)}
+    return None
+
+
 class SafetyChecker:
-    def __init__(self, cfg: SafetyConfig, fetch: Fetch = http_get_json):
+    def __init__(
+        self,
+        cfg: SafetyConfig,
+        fetch: Fetch = http_get_json,
+        post=http_post_json,
+        solana: SolanaConfig | None = None,
+    ):
         self.cfg = cfg
         self.fetch = fetch
+        self.post = post
+        self.solana = solana or SolanaConfig()
         self._cache: dict[str, tuple[float, SafetyReport]] = {}
 
     def check_contract(self, chain: str, address: str) -> SafetyReport:
-        key = f"{chain}:{address.lower()}"
+        chain = chain.lower()
+        key = f"{chain}:{address if chain == 'solana' else address.lower()}"
         cached = self._cache.get(key)
         if cached and time.time() - cached[0] < self.cfg.cache_minutes * 60:
             return cached[1]
+        if chain == "solana":
+            from cryptobot.solana import check_solana_token
+
+            report = check_solana_token(address, self.cfg, self.solana, self.fetch, self.post)
+            if report.verdict != UNKNOWN:
+                self._cache[key] = (time.time(), report)
+            return report
         chain_id = CHAIN_IDS.get(chain)
         if chain_id is None:
             report = SafetyReport(subject=key, verdict=UNKNOWN)
-            report.critical.append(f"Unsupported chain '{chain}' (supported: {', '.join(CHAIN_IDS)})")
+            report.critical.append(f"Unsupported chain '{chain}' (supported: solana, {', '.join(CHAIN_IDS)})")
             return report.finalize()
         goplus = pairs = None
         try:

@@ -26,7 +26,7 @@ from cryptobot.features import (
 )
 from cryptobot.model import OnlineModel
 from cryptobot.risk import DailyLossGuard, DrawdownKillSwitch, Position, check_exit, open_position, size_position
-from cryptobot.safety import SafetyChecker
+from cryptobot.safety import SafetyChecker, resolve_contract
 
 log = logging.getLogger("cryptobot")
 
@@ -34,7 +34,9 @@ TRADE_FIELDS = ["symbol", "entry_ts", "exit_ts", "entry_price", "exit_price", "q
 
 
 class Engine:
-    def __init__(self, cfg: Config, market, broker, model: OnlineModel, checker: SafetyChecker, clock=time.time):
+    def __init__(
+        self, cfg: Config, market, broker, model: OnlineModel, checker: SafetyChecker, clock=time.time, universe=None
+    ):
         self.cfg = cfg
         self.market = market
         self.broker = broker
@@ -50,6 +52,7 @@ class Engine:
         self.prices: dict[str, float] = {}
         self.daily_guard = DailyLossGuard(cfg.risk)
         self.kill_switch = DrawdownKillSwitch(cfg.risk)
+        self.universe = universe
         self._load_state()
 
     # ----- persistence -------------------------------------------------------------
@@ -70,6 +73,9 @@ class Engine:
         self.last_learned_ts = data.get("last_learned_ts", {})
         self.last_bar_ts = data.get("last_bar_ts", {})
         self.prices = data.get("prices", {})
+        # Restore token contracts of coins the scanner found, so held positions stay tradable.
+        for symbol, contract in data.get("contracts", {}).items():
+            self.cfg.token_contracts.setdefault(symbol, contract)
         ks = data.get("kill_switch", {})
         self.kill_switch = DrawdownKillSwitch(self.cfg.risk, ks.get("peak", 0.0), ks.get("tripped", False))
         if "paper_cash" in data and hasattr(self.broker, "cash"):
@@ -83,6 +89,7 @@ class Engine:
             "last_bar_ts": self.last_bar_ts,
             "prices": self.prices,
             "kill_switch": {"peak": self.kill_switch.peak, "tripped": self.kill_switch.tripped},
+            "contracts": {s: self.cfg.token_contracts[s] for s in self.positions if s in self.cfg.token_contracts},
         }
         if hasattr(self.broker, "cash"):
             data["paper_cash"] = self.broker.cash
@@ -117,8 +124,19 @@ class Engine:
         finally:
             self.save_state()
 
+    def symbols(self) -> list[str]:
+        """Configured symbols, scanner picks, and anything still held (never abandon a position)."""
+        found = []
+        if self.universe is not None:
+            try:
+                found = self.universe.refresh()
+            except Exception:
+                log.exception("Scanner refresh failed; keeping the previous list")
+                found = self.universe.symbols
+        return list(dict.fromkeys([*self.cfg.symbols, *found, *self.positions]))
+
     def step(self) -> None:
-        for symbol in self.cfg.symbols:
+        for symbol in self.symbols():
             try:
                 self._step_symbol(symbol)
             except Exception:  # one bad symbol must not stop the others
@@ -204,7 +222,7 @@ class Engine:
             log.warning("Daily loss limit reached; no new trades today")
             return
         report = self.checker.check_market(symbol, ticker, history)
-        contract = cfg.token_contracts.get(symbol)
+        contract = resolve_contract(cfg, symbol)
         if report.tradable and contract:
             report = self.checker.check_contract(contract["chain"], contract["address"])
         if not report.tradable:

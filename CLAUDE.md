@@ -4,7 +4,8 @@ Claude Code reads this file at the start of every session. Keep it short and spe
 
 ## Overview
 Claude Code terminal setup kit (README.md, scripts/, .claude/) plus `cryptobot/`, a Python crypto
-trading bot with online learning and scam-token screening. See cryptobot/README.md.
+trading bot with online learning and scam-token screening. It trades on ccxt exchanges (incl. Coinbase)
+or on Solana via Jupiter, and can auto-discover coins (`scan`). See cryptobot/README.md.
 
 ## Commands
 - Install: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt ruff`

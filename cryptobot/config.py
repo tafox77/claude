@@ -51,8 +51,27 @@ class ModelConfig:
 
 
 @dataclass
+class ScanConfig:
+    enabled: bool = False  # automatically find coins to trade beyond `symbols`
+    max_symbols: int = 10  # extra markets watched at once (on top of `symbols`)
+    candidates: int = 40  # markets screened per refresh
+    refresh_minutes: float = 60
+
+
+@dataclass
+class SolanaConfig:
+    rpc_url: str = "https://api.mainnet-beta.solana.com"  # a private RPC (Helius, QuickNode...) is faster
+    jupiter_url: str = "https://lite-api.jup.ag/swap/v1"  # set JUPITER_API_KEY to use api.jup.ag
+    slippage_bps: int = 100  # max slippage per swap (1%)
+    max_price_impact: float = 0.01  # skip buys that would move the pool price more than this
+    min_sol_balance: float = 0.02  # SOL always kept in the wallet for transaction fees
+    max_priority_fee_lamports: int = 1_000_000  # cap on priority fee per swap (0.001 SOL)
+
+
+@dataclass
 class Config:
     mode: str = "paper"  # paper | live
+    venue: str = "cex"  # cex (a ccxt exchange) | solana (on-chain via Jupiter)
     exchange: str = "binance"
     symbols: list[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT"])
     timeframe: str = "5m"
@@ -67,6 +86,8 @@ class Config:
     risk: RiskConfig = field(default_factory=RiskConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    solana: SolanaConfig = field(default_factory=SolanaConfig)
+    scan: ScanConfig = field(default_factory=ScanConfig)
 
     @property
     def round_trip_cost(self) -> float:
@@ -94,4 +115,12 @@ def load_config(path: str | Path | None) -> Config:
     cfg = _build(Config, data)
     if cfg.mode not in ("paper", "live"):
         raise ValueError("mode must be 'paper' or 'live'")
+    if not cfg.symbols:
+        raise ValueError("List at least one symbol; it also sets the quote currency the scanner uses")
+    if cfg.venue not in ("cex", "solana"):
+        raise ValueError("venue must be 'cex' or 'solana'")
+    if cfg.venue == "solana":
+        bad = [s for s in cfg.symbols if "/" not in s or s.split("/")[1] not in ("USDC", "USDT")]
+        if bad:
+            raise ValueError(f"Solana symbols must be quoted in USDC or USDT (e.g. BONK/USDC): {bad}")
     return cfg
