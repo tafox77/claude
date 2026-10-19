@@ -117,7 +117,10 @@ class Engine:
         try:
             while True:
                 started = self.clock()
-                self.step()
+                try:
+                    self.step()
+                except Exception:  # e.g. Wi-Fi drops: keep going and retry next cycle
+                    log.exception("Cycle failed; retrying in %ss", self.cfg.poll_seconds)
                 time.sleep(max(1.0, self.cfg.poll_seconds - (self.clock() - started)))
         except KeyboardInterrupt:
             log.info("Stopping; open positions are kept in %s", self.state_path)

@@ -76,3 +76,29 @@ def test_engine_blocks_unsafe_market(tmp_path):
     engine = make_engine(tmp_path, AlwaysBuy(ModelConfig()), ThinMarket(synthetic_ohlcv(2000, seed=2)))
     engine.step()
     assert not engine.positions
+
+
+def test_run_forever_survives_network_outage(tmp_path, monkeypatch):
+    """A dropped connection must not stop the bot, even when the balance lookup fails (live mode)."""
+
+    class OfflineBroker(PaperBroker):
+        def free_cash(self):
+            raise ConnectionError("Wi-Fi down")
+
+    class OfflineMarket(FakeMarket):
+        def fetch_closed_ohlcv(self, symbol, timeframe, limit):
+            raise ConnectionError("Wi-Fi down")
+
+    cfg = Config(symbols=["SYN/USDT"], state_dir=str(tmp_path), poll_seconds=1)
+    market = OfflineMarket(synthetic_ohlcv(600, seed=2))
+    engine = Engine(cfg, market, OfflineBroker(1000, 0, 0), OnlineModel(ModelConfig()), SafetyChecker(cfg.safety))
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            raise KeyboardInterrupt  # stand-in for pressing Ctrl+C
+
+    monkeypatch.setattr("cryptobot.engine.time.sleep", fake_sleep)
+    engine.run_forever()
+    assert len(sleeps) == 3  # kept cycling through the outage until stopped
