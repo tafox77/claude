@@ -1,0 +1,17 @@
+# Reviewed canonical token identities. Copy to identity_registry.toml and fill in ONLY entries you
+# have verified yourself against the issuer's official documentation AND on-chain state.
+#
+# Every entry needs provenance (where you verified it), who reviewed it, and when. A token passes the
+# identity check only if this registry names its exact address for the claimed symbol AND an
+# independent machine source (provider metadata / on-chain symbol) agrees. A registry entry naming a
+# different address for the same symbol makes the lookalike BLOCK.
+#
+# No entries are pre-filled: this file ships empty on purpose.
+#
+# [[token]]
+# chain = "solana"                       # or evm:1, evm:56, evm:8453, evm:42161
+# symbol = "EXAMPLE"
+# address = "<exact mint / contract address>"
+# provenance = "<official URL you checked>"
+# reviewed_by = "<your name>"
+# reviewed_at = "2026-10-19"

@@ -1,0 +1,68 @@
+# Reviewed risk / screening policy. Every intent, report and model decision records this file's hash.
+# Changing anything here changes the policy version; code never edits it at runtime.
+# These are starting assumptions, not validated protective boundaries.
+
+mode = "paper"            # paper | sandbox | live  (live additionally needs an approval file; see README)
+timezone = "UTC"          # daily loss anchor boundary
+
+[risk]
+virtual_equity = "10000"
+max_asset_exposure_pct = "0.05"
+max_total_exposure_pct = "0.15"
+max_positions = 3
+risk_per_trade_pct = "0.0025"
+cost_allowance_pct = "0.003"      # fees + slippage allowance added to stop distance when sizing
+daily_loss_stop_pct = "0.02"
+drawdown_stop_pct = "0.05"
+max_group_exposure_pct = "0.10"   # correlated assets share this cap
+
+[risk.correlation_groups]
+majors = ["cex:coinbase:BTC-USD", "cex:coinbase:ETH-USD"]
+
+[market]
+max_quote_age_s = "2"
+max_spread_pct = "0.002"
+max_clock_skew_s = "5"
+heartbeat_timeout_s = "10"
+
+[execution]
+entry_time_in_force = "IOC"
+max_entry_slippage_pct = "0.001"
+max_exit_slippage_pct = "0.003"
+emergency_max_impact_pct = "0.02"   # reviewed limit for manual/emergency flatten
+order_ack_timeout_s = "5"
+taker_fee_pct = "0.006"             # Coinbase Advanced low tiers; replace with your actual tier
+maker_fee_pct = "0.004"
+
+[strategy]
+name = "momentum_v1"
+fast_window_s = 30
+slow_window_s = 300
+min_edge_pct = "0.0015"
+stop_pct = "0.006"
+target_pct = "0.012"
+max_hold_s = 3600
+
+[screening]
+min_liquidity_usd = "250000"
+min_age_days = "7"
+max_top10_holder_pct = "0.20"
+max_buy_tax = "0.02"
+max_sell_tax = "0.02"
+max_evidence_age_s = "60"
+min_lp_locked_pct = "0.95"          # share of LP that must be burned or locked
+min_lp_lock_remaining_days = "30"   # locks expiring sooner don't count
+allow_mutable_metadata = false
+
+# Approved markets for the initial paper phase. A risk policy, not a claim these assets can't lose money.
+[[allowlist.cex]]
+venue = "coinbase"
+market_id = "BTC-USD"
+base_id = "BTC"
+quote_id = "USD"
+
+[[allowlist.cex]]
+venue = "coinbase"
+market_id = "ETH-USD"
+base_id = "ETH"
+quote_id = "USD"

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spotguard"
+version = "0.1.0"
+description = "Spot-only crypto trading application: paper trading, token-risk screening, risk gates and shadow learning"
+readme = "README.md"
+requires-python = ">=3.11"
+# Exact versions that the test suite was run against; see requirements.lock for the full tree.
+dependencies = [
+    "httpx==0.28.1",
+    "websockets==17.3",
+    "numpy==2.5.4",
+    "scikit-learn==1.9.1",
+    "joblib==1.6.0",
+    "solders==0.29.0",
+    "pycryptodome==4.1.0",
+]
+
+[project.optional-dependencies]
+live = ["ccxt==4.5.88"]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "hypothesis==6.170.2", "ruff==0.17.1", "ccxt==4.5.88"]
+
+[project.scripts]
+spotguard = "spotguard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+spotguard = ["py.typed", "migrations/*.sql"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["network: needs real network access to a provider (skipped unless SPOTGUARD_NETWORK_TESTS=1)"]
