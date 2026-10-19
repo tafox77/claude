@@ -99,15 +99,16 @@ class ExitSupervisor:
         if rules is None:
             self._alert(key, "critical", f"{key}: exit wanted ({reason}) but market rules missing")
             return
-        slip = self.policy.execution.emergency_max_impact_pct if emergency else self.policy.execution.max_exit_slippage_pct
-        # Impact is measured from the mid, not the best bid: if bids have collapsed, "x% below the bid"
-        # would still dump into a hollow book.
-        reference = q.mid if q.mid is not None else q.best_bid
-        limit = round_price(reference * (1 - slip), Decimal(rules.price_increment), "up")
+        ex = self.policy.execution
+        slip = ex.emergency_max_impact_pct if emergency else ex.max_exit_slippage_pct
+        # Price off the bid (so a wide spread can't block a stop), but never below the reviewed emergency
+        # impact limit measured from the mid (so a collapsed bid side isn't dumped into).
+        floor = q.mid * (1 - ex.emergency_max_impact_pct) if q.mid is not None else q.best_bid * (1 - slip)
+        limit = round_price(max(q.best_bid * (1 - slip), floor), Decimal(rules.price_increment), "up")
         sellable = sum((size for price, size in q.bids if price >= limit), Decimal(0))
         exit_qty = round_qty(min(qty, sellable), Decimal(rules.base_increment))
         if exit_qty <= 0 or exit_qty < Decimal(rules.base_min_size):
-            self._alert(key, "critical", f"{key}: UNSELLABLE within {slip:.2%} of bid ({reason}); "
+            self._alert(key, "critical", f"{key}: UNSELLABLE at or above {limit} ({reason}); "
                                          f"{qty} still held, will retry")  # fmt: skip
             return
         allowed, why = RiskEngine.check_exit(exit_qty, qty)

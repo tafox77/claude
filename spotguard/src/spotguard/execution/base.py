@@ -36,7 +36,7 @@ ALLOWED: dict[OrderState, set[OrderState]] = {
     OrderState.PARTIAL: {OrderState.PARTIAL, OrderState.FILLED, OrderState.CANCEL_PENDING, OrderState.CANCELED,
                          OrderState.UNKNOWN},
     OrderState.CANCEL_PENDING: {OrderState.CANCELED, OrderState.FILLED, OrderState.PARTIAL, OrderState.CANCEL_PENDING,
-                                OrderState.UNKNOWN},
+                                OrderState.UNKNOWN, OrderState.REJECTED},
     OrderState.UNKNOWN: {OrderState.ACKNOWLEDGED, OrderState.PARTIAL, OrderState.FILLED, OrderState.CANCELED,
                          OrderState.REJECTED, OrderState.UNKNOWN, OrderState.CANCEL_PENDING},
 }  # fmt: skip

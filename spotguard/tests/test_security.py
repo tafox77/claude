@@ -350,3 +350,15 @@ def test_solana_unburned_lp_blocks_and_missing_is_unknown(policy):
     assert sol(policy, goplus=goplus_sol(dex=...)).verdict is Verdict.UNKNOWN
     cl = [{"type": "concentrated", "tvl": "900000", "id": SOL_POOL}]
     assert sol(policy, goplus=goplus_sol(dex=cl)).verdict is Verdict.UNKNOWN
+
+
+def test_evm_holder_concentration_excludes_pools_before_taking_top_ten(policy):
+    """Regression: slicing the first ten entries before excluding pools undercounted concentration."""
+    from fixtures_security import EVM_PAIR
+
+    locked = [{"address": EVM_PAIR, "percent": "0.30", "is_locked": 0}] + [
+        {"address": f"0x{i:040x}", "percent": "0.05", "is_locked": 1} for i in range(100, 109)
+    ]
+    wallets = [{"address": f"0x{i:040x}", "percent": "0.03", "is_locked": 0} for i in range(3, 13)]
+    report = evm(policy, goplus=goplus_evm(holders=locked + wallets))  # 10 wallets x 3% = 30% > 20%
+    assert any(f.check == "holder_concentration" and f.status is Verdict.BLOCK for f in report.findings)

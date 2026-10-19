@@ -103,12 +103,13 @@ class Runtime:
                                    float(self.policy.execution.order_ack_timeout_s), self.wall)  # fmt: skip
         self.strategy = MomentumStrategy(self.policy.strategy)
         self.supervisor = ExitSupervisor(self.policy, self.store, self.orders, self.risk, self.board, self.rules,
-                                         self.mono_ns, self.wall)  # fmt: skip
+                                         self.mono_ns, self.wall, deteriorated=self.deterioration)  # fmt: skip
         self._asset_locks: dict[str, asyncio.Lock] = {}
         self.board.listeners.append(self.queue.put)
         # Bounded: a long paper run must not grow memory with every rejected signal.
         self.decisions: deque[dict] = deque(maxlen=5000)
         self.decision_counts: Counter[str] = Counter()
+        self._seen_controls: dict[str, tuple[str, str, str]] | None = None
 
     # ----- startup -----------------------------------------------------------------------------
     async def startup(self, acquire_leader: bool = True) -> list[str]:
@@ -117,22 +118,46 @@ class Runtime:
         await self.orders.reconcile_all()
         return await self.reconcile_balances()
 
+    def deterioration(self, asset_key: str) -> str | None:
+        """Why a held asset should be exited early, if anything has deteriorated.
+
+        CEX: the market was removed from the reviewed allowlist. DEX: the latest stored screening report
+        is BLOCK. (Venue product status is validated at startup only; it is not re-polled.)
+        """
+        if asset_key.startswith("cex:"):
+            if not any(m.key == asset_key for m in self.policy.cex_allowlist):
+                return "market no longer on the reviewed allowlist"
+            return None
+        rows = self.store.query(
+            "SELECT verdict FROM security_reports WHERE asset_key = ? ORDER BY created_at DESC LIMIT 1", (asset_key,)
+        )
+        if rows and rows[0][0] == "BLOCK":
+            return "latest screening verdict is BLOCK"
+        return None
+
     async def reconcile_balances(self) -> list[str]:
+        problems = self.store.verify_ledger(self.quote_currency)  # journal-replay check, meaningful in every mode
         venue = await self.adapter.balances()
-        problems = []
         cash = self.store.balance(self.quote_currency)
         if venue.get(self.quote_currency, Decimal(0)) != cash:
             problems.append(f"{self.quote_currency}: ledger {cash} != venue {venue.get(self.quote_currency)}")
-        for key, pos in self.store.positions().items():
-            if venue.get(key, Decimal(0)) != pos.qty:
-                problems.append(f"{key}: ledger {pos.qty} != venue {venue.get(key)}")
+
+        def venue_qty(key: str) -> Decimal:
+            # Paper venues report by asset key; live venues report by currency code (e.g. "BTC").
+            base = key.split(":")[-1].split("-")[0] if key.startswith("cex:") else key
+            return venue.get(key, venue.get(base, Decimal(0)))
+
+        positions = self.store.positions()
+        for key, pos in positions.items():
+            if venue_qty(key) != pos.qty:
+                problems.append(f"{key}: ledger {pos.qty} != venue {venue_qty(key)}")
+        known = set(positions) | {k.split(":")[-1].split("-")[0] for k in positions if k.startswith("cex:")}
         for key, qty in venue.items():
-            if key != self.quote_currency and qty and key not in self.store.positions():
+            if key != self.quote_currency and qty and key not in known:
                 problems.append(f"{key}: venue holds {qty} the ledger doesn't know about")
         if problems:
-            msg = "startup balance reconciliation failed: " + "; ".join(problems)
-            self.risk.set_block_entries(True, "startup-reconciliation", msg, self.wall())
-            self.store.alert("critical", msg, self.wall())
+            # A latch (not a pause): it persists and only a named reviewer can clear it.
+            self.risk.latch("reconciliation", "; ".join(problems), self.wall())
         return problems
 
     # ----- accounting ---------------------------------------------------------------------------
@@ -151,14 +176,31 @@ class Runtime:
         self.poll_controls()
         return self.risk.mark(self.equity(), self.wall())
 
+    def _control_rows(self) -> dict[str, tuple[str, str, str]]:
+        return {r["name"]: (r["value"], r["updated_at"], r["actor"]) for r in self.store.query("SELECT * FROM controls")}
+
     def poll_controls(self) -> None:
+        """Apply dashboard/CLI controls only when they CHANGE (edge-triggered).
+
+        A leftover 'unblock' row from an earlier session must never silently undo a later block,
+        and automatic protections (latches) can't be cleared from here at all.
+        """
         now = self.wall()
-        block = self.store.get_control("block_entries")
-        if block in ("1", "0") and (block == "1") != self.risk.state.block_entries:
-            self.risk.set_block_entries(block == "1", "dashboard", "set from dashboard", now)
-        if self.store.get_control("flatten") == "requested":
-            self.risk.request_flatten("dashboard", now)
-            self.store.set_control("flatten", "accepted", "runtime", now)
+        rows = self._control_rows()
+        if self._seen_controls is None:  # first poll: remember current rows; don't replay old actions
+            self._seen_controls = rows
+            return
+        for name, row in rows.items():
+            if self._seen_controls.get(name) == row:
+                continue
+            self._seen_controls[name] = row
+            value, _, actor = row
+            if name == "block_entries" and value in ("1", "0"):
+                self.risk.set_block_entries(value == "1", actor or "operator", f"set by {actor}", now)
+            elif name == "flatten" and value == "requested":
+                self.risk.request_flatten(actor or "operator", now)
+                self.store.set_control("flatten", "accepted", actor or "operator", now)
+                self._seen_controls["flatten"] = self._control_rows()["flatten"]
 
     # ----- entries --------------------------------------------------------------------------------
     async def on_market(self, key: str) -> None:
@@ -218,9 +260,8 @@ class Runtime:
         acked = time.monotonic_ns()
         self.latency.record("submit_to_ack", acked - submit_ns)
         row = self.store.order(cid)
-        if D(row["filled_qty"]) > 0:
+        if D(row["filled_qty"]) > 0:  # stop/target were already applied atomically with the fill
             self.latency.record("submit_to_fill", acked - submit_ns)
-            self.store.set_protection(signal.asset_key, signal.stop, signal.target)
 
     # ----- loops ------------------------------------------------------------------------------------
     async def strategy_loop(self, stop: asyncio.Event) -> None:

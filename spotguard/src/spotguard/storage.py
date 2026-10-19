@@ -181,6 +181,32 @@ class Store:
             )
         return out
 
+    def verify_ledger(self, quote_currency: str) -> list[str]:
+        """Rebuild cash and positions from the cash-flow and fill journals and compare with the ledger.
+
+        Catches partial writes or manual edits. Fills are applied atomically, so in normal operation this
+        always agrees; a mismatch means the database was modified outside the application.
+        """
+        problems = []
+        cash = sum((D(r[0]) for r in self.query("SELECT amount FROM cash_flows WHERE currency = ?", (quote_currency,))), ZERO)
+        held: dict[str, Decimal] = {}
+        for r in self.query("SELECT asset_key, side, qty, price, fee FROM fills ORDER BY at, rowid"):
+            notional, fee = D(r["qty"]) * D(r["price"]), D(r["fee"])
+            if r["side"] == "buy":
+                cash -= notional + fee
+                held[r["asset_key"]] = held.get(r["asset_key"], ZERO) + D(r["qty"])
+            else:
+                cash += notional - fee
+                held[r["asset_key"]] = held.get(r["asset_key"], ZERO) - D(r["qty"])
+        if self.query("SELECT 1 FROM balances WHERE currency = ?", (quote_currency,)) and cash != self.balance(quote_currency):
+            problems.append(f"ledger cash {self.balance(quote_currency)} != journal {cash}")
+        positions = self.positions()
+        for key in set(held) | set(positions):
+            ledger = positions[key].qty if key in positions else ZERO
+            if held.get(key, ZERO) != ledger:
+                problems.append(f"{key}: ledger {ledger} != journal {held.get(key, ZERO)}")
+        return problems
+
     def set_protection(self, asset_key: str, stop: Decimal | None, target: Decimal | None) -> None:
         with self.tx() as c:
             c.execute(
@@ -191,9 +217,11 @@ class Store:
     # ----- intents & orders ---------------------------------------------------------------------
     def insert_intent(self, row: dict) -> None:
         with self.tx() as c:
+            row = {"stop": None, "target": None, **row}
             c.execute(
-                "INSERT INTO intents VALUES (:intent_id, :created_at, :asset_key, :side, :purpose, :qty, "
-                ":limit_price, :reason, :policy_version, :model_version, :decision)",
+                "INSERT INTO intents (intent_id, created_at, asset_key, side, purpose, qty, limit_price, reason, "
+                "policy_version, model_version, decision, stop, target) VALUES (:intent_id, :created_at, :asset_key, "
+                ":side, :purpose, :qty, :limit_price, :reason, :policy_version, :model_version, :decision, :stop, :target)",
                 row,
             )
 
@@ -304,10 +332,20 @@ class Store:
                 "INSERT INTO balances VALUES (?, ?) ON CONFLICT(currency) DO UPDATE SET amount = excluded.amount",
                 (quote_currency, str(new_cash)),
             )
+            # Protection comes from the intent that opened the position, in this same transaction.
+            # A position opened from flat takes its intent's stop/target; a closed position clears them,
+            # so a later re-entry never inherits a stale stop.
+            stop = pos["stop"] if pos is not None and held > 0 else None
+            target = pos["target"] if pos is not None and held > 0 else None
+            if side == "buy" and held == 0:
+                intent = c.execute("SELECT stop, target FROM intents WHERE intent_id = ?", (order["intent_id"],)).fetchone()
+                stop, target = (intent["stop"], intent["target"]) if intent else (None, None)
+            if new_qty == 0:
+                stop = target = None
             if pos is None:
                 c.execute(
-                    "INSERT INTO positions VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
-                    (asset, str(new_qty), str(new_basis), iso(at), order["intent_id"], str(realized), iso(at)),
+                    "INSERT INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (asset, str(new_qty), str(new_basis), stop, target, iso(at), order["intent_id"], str(realized), iso(at)),
                 )
             else:
                 opened = pos["opened_at"] if held > 0 else iso(at)
@@ -316,8 +354,8 @@ class Store:
                     new_basis = ZERO
                 c.execute(
                     "UPDATE positions SET qty = ?, cost_basis = ?, realized_pnl = ?, opened_at = ?, "
-                    "entry_intent_id = ?, updated_at = ? WHERE asset_key = ?",
-                    (str(new_qty), str(new_basis), str(realized), opened, entry, iso(at), asset),
+                    "entry_intent_id = ?, stop = ?, target = ?, updated_at = ? WHERE asset_key = ?",
+                    (str(new_qty), str(new_basis), str(realized), opened, entry, stop, target, iso(at), asset),
                 )
             return True
 

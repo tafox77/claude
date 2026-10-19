@@ -84,6 +84,25 @@ class RiskEngine:
             self._save(("init", f"anchor={eq}"), now)
         else:
             self.state = RiskState(**loaded)
+        self._synced_latches = set(self.state.latched)
+
+    def sync_external_resets(self) -> list[str]:
+        """Adopt latch resets made by another process (e.g. `spotguard risk reset` while trading).
+
+        A latch this engine knew was persisted but is now absent from the database was reset by a
+        reviewer; without this the running engine would write it straight back.
+        """
+        stored = self.store.load_risk_state() or {}
+        stored_latched = stored.get("latched", {})
+        cleared = [k for k in self.state.latched if k in self._synced_latches and k not in stored_latched]
+        for kind in cleared:
+            del self.state.latched[kind]
+            if kind == "daily_loss":
+                self.state.day_anchor_equity = stored.get("day_anchor_equity", self.state.day_anchor_equity)
+            if kind == "drawdown":
+                self.state.high_water = stored.get("high_water", self.state.high_water)
+        self._synced_latches = set(self.state.latched)
+        return [f"latch {k} reset externally" for k in cleared]
 
     # ----- persistence --------------------------------------------------------------------
     def _day(self, now: datetime) -> str:
@@ -91,10 +110,11 @@ class RiskEngine:
 
     def _save(self, event: tuple[str, str] | None, now: datetime) -> None:
         self.store.save_risk_state(self.state.to_dict(), event, now)
+        self._synced_latches = set(self.state.latched)
 
     # ----- marks & latches ------------------------------------------------------------------
     def mark(self, equity: Decimal, now: datetime) -> list[str]:
-        events = []
+        events = self.sync_external_resets()
         changed = False
         day = self._day(now)
         if day != self.state.day:
@@ -202,7 +222,10 @@ class RiskEngine:
             return RiskDecision(False, reasons=reasons)
 
         e, price = view.equity, req.entry_price
-        per_unit_risk = (price - req.stop) + price * r.cost_allowance_pct
+        ex = self.policy.execution
+        # Loss per unit if the stop is hit: stop distance + taker fee on both legs + the worst exit slippage
+        # the supervisor may accept + an extra allowance. (Gaps through the stop can still lose more.)
+        per_unit_risk = (price - req.stop) + price * (2 * ex.taker_fee_pct + ex.max_exit_slippage_pct + r.cost_allowance_pct)
         total_exposure = sum(view.position_values.values(), ZERO) + sum(view.pending_entry_values.values(), ZERO)
         caps = {
             "risk": e * r.risk_per_trade_pct / per_unit_risk,

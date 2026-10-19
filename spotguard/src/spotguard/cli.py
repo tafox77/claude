@@ -41,7 +41,7 @@ def _shadow_factory(args):
 
         def on_anomaly(detail):
             reg.record_drift(model_id, detail, rt.wall())
-            rt.risk.set_block_entries(True, "drift-monitor", f"model drift: {detail}", rt.wall())
+            rt.risk.latch("model_drift", f"model {model_id[:16]} drift: {detail}", rt.wall())
 
         return ShadowRunner(rt.store, model_id, reg.load(model_id), params["horizon"], 60, drift, on_anomaly)
 

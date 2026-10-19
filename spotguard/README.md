@@ -17,18 +17,21 @@ What it never does:
 
 ## Status
 
-**177 offline tests pass**, and ruff lint and format checks are clean. Python 3.13.16 on Linux; the code targets 3.11 and later.
+**205 offline tests pass**, and ruff lint and format checks are clean. Python 3.13.16 on Linux; the code targets 3.11 and later.
 
 | Test file | Tests |
 | --- | --- |
-| `test_security.py` | 72 |
+| `test_security.py` | 73 |
+| `test_execution.py` | 27 |
 | `test_dex_and_live.py` | 25 |
-| `test_execution.py` | 23 |
+| `test_runtime.py` | 21 |
 | `test_market_data.py` | 19 |
-| `test_runtime.py` | 16 |
-| `test_risk.py` | 11 |
+| `test_policy.py` | 17 |
+| `test_risk.py` | 12 |
 | `test_learning.py` | 10 |
 | `test_properties.py` | 1 (60 generated cases) |
+
+An independent code review (October 19) traced every subsystem against the code. It found ten significant problems, which have since been fixed and covered by regression tests. Smaller limitations it found are listed under **Known gaps**.
 
 **Nothing here has connected to a real exchange, chain or security provider.** The build environment had no network access to them. External formats were checked against the official GoPlus Python SDK (v0.2.6 swagger models), ccxt 4.5.88's Coinbase REST/WebSocket parsers, and Coinbase's documentation via search. Every network adapter is therefore marked **mock-only** in [IMPLEMENTATION_MATRIX.md](IMPLEMENTATION_MATRIX.md).
 
@@ -40,7 +43,7 @@ The spec's reference `guard.py` and its offline replay were **not provided** wit
 cd spotguard
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.lock && pip install --no-deps -e .
-python -m pytest -q                       # 177 passed
+python -m pytest -q                       # 205 passed
 
 spotguard init                            # creates spotguard.sqlite with $10,000 virtual USD
 spotguard replay --generate --fresh       # deterministic offline paper replay (synthetic data)
@@ -71,7 +74,10 @@ spotguard models approve --model <id-prefix> --by <you> --note "..."   # refused
 spotguard kill block --by <you>           # kill switch A: no new entries
 spotguard kill flatten --by <you>         # kill switch B: cancel entries, reconcile, exit all within the reviewed impact limit
 spotguard risk status
-spotguard risk reset --kind daily_loss --by <you> --note "reviewed"    # latches survive restarts; only a named review clears them
+spotguard risk reset --kind daily_loss --by <you> --note "reviewed" --reanchor <equity>
+#   latches (daily_loss, drawdown, reconciliation, model_drift) survive restarts; only a named review clears them.
+#   A running trader picks up the reset within ~1 s. Without --reanchor a daily_loss/drawdown latch re-trips
+#   on the next mark if the loss is still beyond the limit.
 spotguard export-fills --out fills.csv    # accounting export (not a complete tax record)
 spotguard matrix                          # implemented / not-implemented matrix
 ```
@@ -107,9 +113,17 @@ Coinbase WS (level2 + heartbeats) ──► L2 handler (seq gaps / dupes / cross
                               ▼
             PaperVenue | CoinbaseLiveAdapter (disabled) | DEX simulation (policy-validated)
 
-Screening (EVM / Solana adapters, own task) ─► PASS_POLICY / BLOCK / UNKNOWN + evidence ─► entry gate only
-Shadow learning (own task) ─► predictions/labels ─► drift alarm ─► kill switch A (no new entries)
+Shadow learning (inside the strategy step) ─► predictions/labels ─► drift alarm ─► model_drift latch
+`spotguard screen` (separate command, not part of the trading loop) ─► PASS_POLICY / BLOCK / UNKNOWN + evidence
 ```
+
+**How the pieces connect, exactly:**
+- **Controls.** Dashboard and CLI controls are applied only when they change. Each one is credited to whoever made it. A stale row can never undo a later block.
+- **Automatic protections are latches.** These are the startup ledger/venue mismatch, model drift, daily loss and drawdown. Pause/resume can't clear a latch; only `risk reset` can.
+- **Stop and target travel with the entry intent.** They are written to the position in the same database transaction as the first fill. So any entry that fills, by whatever path, is protected, and a re-entry never inherits an old stop.
+- **Early exits for deterioration.** An exchange market is exited early if it is removed from the allowlist. A DEX asset is exited if its latest stored screening report is BLOCK. Product status is validated at startup only.
+- **Exit prices.** Exits are priced off the best bid, floored at the reviewed emergency impact below the mid. A wide spread can't block a stop, and a collapsed bid side can't be dumped into.
+- **Sizing.** The loss at the stop is computed as stop distance + taker fee on both legs + the maximum exit slippage + an extra allowance.
 
 **Storage:** SQLite in WAL mode with a single writer and an exclusive leader lock (one trading process per database). These are persisted transactionally:
 - intents, orders and order events
@@ -148,9 +162,9 @@ These are local computation figures from the 240-minute replay (71,980 messages)
 
 | Stage | p50 | p95 | p99 |
 | --- | --- | --- | --- |
-| quote → decision (strategy + risk) | 0.106 ms | 0.199 ms | 0.253 ms |
-| decision → submit | 0.038 ms | 0.077 ms | 0.091 ms |
-| submit → ack/fill (paper venue + SQLite fsync) | 2.36 ms | 3.35 ms | 3.73 ms |
+| quote → decision (strategy + risk) | 0.115 ms | 0.219 ms | 0.275 ms |
+| decision → submit | 0.040 ms | 0.070 ms | 0.078 ms |
+| submit → ack/fill (paper venue + SQLite fsync) | 2.77 ms | 5.03 ms | 6.67 ms |
 
 The local p95 target is under 100 ms.
 
@@ -158,7 +172,7 @@ The same replay made 55 entries and 53 round trips, with **−0.53% net after $3
 
 ## Known gaps
 
-The full list is in the [matrix](IMPLEMENTATION_MATRIX.md). The main ones:
+The full list is in the [matrix](IMPLEMENTATION_MATRIX.md). **Screening is a separate command:** the trading loop only trades the two allowlisted Coinbase markets and never consults `screen` results for entries. The main gaps:
 - Independent pool, sell-simulation, role-reachability and concentrated-liquidity analysis are missing, so DEX tokens screen as UNKNOWN.
 - Stops are enforced by the supervisor, not by native exchange stop orders. They can only act while the process runs and has data.
 - PostgreSQL and multiple processes are not supported.
@@ -166,6 +180,12 @@ The full list is in the [matrix](IMPLEMENTATION_MATRIX.md). The main ones:
 - No secret-manager integration.
 - No rug-incident or delisted-token datasets.
 - Models never drive trades; the strategy is a fixed baseline.
+- Smaller limitations found in the code review, not yet fixed:
+  - During a feed resync, the last good quote can still be used for up to 2 s.
+  - A quiet market with no book updates for 2 s counts as stale, which delays exits until the next update.
+  - Exception tracebacks bypass log redaction.
+  - `replay` and `paper` default to the same database file; use `--db` to separate them.
+  - Shadow labels ignore costs, and the approval gate counts closed trades globally rather than per model.
 
 ## Before any live setup
 

@@ -45,8 +45,8 @@ async def test_startup_balance_mismatch_blocks_entries(policy, tmp_path):
     rt, clock, board, venue = make_runtime(policy, tmp_path)
     venue.cash["USD"] = Decimal("9000")  # venue disagrees with the ledger
     problems = await rt.startup(acquire_leader=False)
-    assert problems and rt.risk.state.block_entries
-    assert "reconciliation" in rt.risk.state.block_reason
+    assert problems and "reconciliation" in rt.risk.state.latched  # a persisted latch, not a pause
+    assert rt.risk.entry_blockers()
 
 
 async def test_startup_reconciliation_passes_when_consistent(policy, tmp_path):
@@ -64,13 +64,44 @@ def test_conflating_queue_keeps_one_pending_per_market():
 
 
 async def test_dashboard_controls_flow_into_risk_engine(policy, tmp_path):
+    from datetime import timedelta
+
     rt, *_ = make_runtime(policy, tmp_path)
-    rt.store.set_control("block_entries", "1", "dashboard", NOW)
+    rt.mark()  # first poll only records existing rows
+    rt.store.set_control("block_entries", "1", "alice", NOW)
     rt.mark()
-    assert rt.risk.state.block_entries
-    rt.store.set_control("flatten", "requested", "dashboard", NOW)
+    assert rt.risk.state.block_entries and "alice" in rt.risk.state.block_reason
+    rt.store.set_control("flatten", "requested", "bob", NOW + timedelta(seconds=1))
     rt.mark()
     assert rt.risk.state.flatten_requested and rt.store.get_control("flatten") == "accepted"
+
+
+async def test_stale_resume_row_cannot_undo_later_blocks(policy, tmp_path):
+    """Regression: an old 'unblock' row used to silently cancel every later pause, flatten pause and drift block."""
+    rt, *_ = make_runtime(policy, tmp_path)
+    rt.store.set_control("block_entries", "0", "alice", NOW)  # left over from an earlier session
+    rt.mark()
+    rt.risk.request_flatten("bob", NOW)
+    rt.risk.latch("model_drift", "psi 0.4", NOW)
+    for _ in range(3):
+        rt.mark()
+    assert rt.risk.state.block_entries and "model_drift" in rt.risk.state.latched
+    rt.store.set_control("block_entries", "0", "carol", NOW.replace(second=5))
+    rt.mark()  # an explicit new resume clears the pause, but never a latch
+    assert not rt.risk.state.block_entries and "model_drift" in rt.risk.state.latched
+
+
+async def test_external_risk_reset_reaches_running_trader(policy, tmp_path):
+    """Regression: `spotguard risk reset` was overwritten by the running engine on its next save."""
+    from spotguard.risk import RiskEngine
+
+    rt, *_ = make_runtime(policy, tmp_path)
+    rt.risk.latch("daily_loss", "test", NOW)
+    cli_engine = RiskEngine(policy, Store(tmp_path / "db.sqlite"), NOW)  # what the CLI does
+    cli_engine.reset("daily_loss", "alice", "reviewed", NOW, Decimal("10000"))
+    events = rt.mark()
+    assert "daily_loss" not in rt.risk.state.latched and any("reset externally" in e for e in events)
+    assert "daily_loss" not in RiskEngine(policy, Store(tmp_path / "db.sqlite"), NOW).state.latched
 
 
 # ----- live-data paper path with a fake WebSocket (mock: not a Coinbase integration test) -----------
@@ -197,3 +228,33 @@ def test_logs_redact_credentials_and_signing_material(secret):
     assert "REDACTED" in out
     for fragment in ("eyJhbGci", "abcd1234efgh5678", "s3cr3t-value", "MHcCAQEE", "ab" * 32, "5" * 87):
         assert fragment not in out
+
+
+async def test_ledger_tampering_latches_reconciliation(policy, tmp_path):
+    rt, clock, board, venue = make_runtime(policy, tmp_path)
+    assert await rt.startup(acquire_leader=False) == []
+    with rt.store.tx() as c:
+        c.execute("UPDATE balances SET amount = '12000' WHERE currency = 'USD'")  # edited outside the app
+    venue.cash["USD"] = Decimal("12000")  # even if the venue agrees, the journal doesn't
+    problems = await rt.reconcile_balances()
+    assert any("journal" in p for p in problems) and "reconciliation" in rt.risk.state.latched
+
+
+async def test_live_style_balances_keyed_by_currency_reconcile(policy, tmp_path):
+    rt, clock, board, venue = make_runtime(policy, tmp_path)
+
+    async def live_balances():
+        return {"USD": Decimal("10000")}
+
+    venue.balances = live_balances
+    assert await rt.reconcile_balances() == []
+
+
+async def test_deterioration_exit_is_wired(policy, tmp_path):
+    import dataclasses
+
+    rt, clock, board, venue = make_runtime(policy, tmp_path)
+    assert rt.deterioration(BTC.key) is None
+    rt.policy = dataclasses.replace(policy, cex_allowlist=())
+    assert "allowlist" in rt.deterioration(BTC.key)
+    assert rt.supervisor.deteriorated == rt.deterioration

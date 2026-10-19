@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from spotguard.identities import CexMarketId
 
@@ -150,14 +151,34 @@ def _decimals(cls: type, data: dict, prefix: str, bounds: dict[str, tuple] | Non
 PCT = (Decimal(0), Decimal(1))
 
 
+TOP_LEVEL = {"mode", "timezone", "risk", "market", "execution", "strategy", "screening", "allowlist"}
+
+
 def load_policy(path: str | Path) -> Policy:
     raw_bytes = Path(path).read_bytes()
-    raw = tomllib.loads(raw_bytes.decode())
+    try:
+        raw = tomllib.loads(raw_bytes.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise PolicyError(f"{path}: not valid TOML: {exc}") from exc
+    unknown_top = set(raw) - TOP_LEVEL
+    if unknown_top:  # a typo like [risks] must not silently fall back to defaults
+        raise PolicyError(f"unknown top-level keys/sections: {sorted(unknown_top)}")
+    if set(_section(raw, "allowlist")) - {"cex"}:
+        raise PolicyError(f"unknown [allowlist] keys: {sorted(set(raw['allowlist']) - {'cex'})}")
     mode = raw.get("mode", "paper")
-    if mode not in ("paper", "sandbox", "live"):
-        raise PolicyError("mode must be paper, sandbox or live")
+    if mode not in ("paper", "live"):  # 'sandbox' is not implemented (Coinbase has no ccxt sandbox)
+        raise PolicyError("mode must be 'paper' or 'live'")
+    timezone = raw.get("timezone", "UTC")
+    try:
+        ZoneInfo(str(timezone))
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise PolicyError(f"unknown timezone {timezone!r}") from exc
     risk_raw = dict(_section(raw, "risk"))
     groups_raw = risk_raw.pop("correlation_groups", {})
+    if not isinstance(groups_raw, dict) or not all(
+        isinstance(m, list) and m and all(isinstance(x, str) for x in m) for m in groups_raw.values()
+    ):
+        raise PolicyError("risk.correlation_groups must be a table of non-empty arrays of asset keys")
     pct_keys = {k: PCT for k in RiskLimits.__dataclass_fields__ if k.endswith("_pct")}
     risk = RiskLimits(
         **_decimals(RiskLimits, risk_raw, "risk", pct_keys),
@@ -165,9 +186,22 @@ def load_policy(path: str | Path) -> Policy:
     )
     if risk.max_positions < 1:
         raise PolicyError("risk.max_positions must be >= 1")
+    for key in ("risk_per_trade_pct", "daily_loss_stop_pct", "drawdown_stop_pct", "max_asset_exposure_pct",
+                "max_total_exposure_pct"):  # fmt: skip
+        if getattr(risk, key) <= 0:
+            raise PolicyError(f"risk.{key} must be > 0")
+    seen_groups: set[str] = set()
+    for _name, members in risk.correlation_groups:
+        dup = seen_groups & set(members)
+        if dup:
+            raise PolicyError(f"asset(s) {sorted(dup)} appear in more than one correlation group")
+        seen_groups |= set(members)
     if risk.max_asset_exposure_pct > risk.max_total_exposure_pct:
         raise PolicyError("risk.max_asset_exposure_pct cannot exceed max_total_exposure_pct")
-    market = MarketPolicy(**_decimals(MarketPolicy, _section(raw, "market"), "market"))
+    market = MarketPolicy(**_decimals(MarketPolicy, _section(raw, "market"), "market", {"max_spread_pct": PCT}))
+    for key in ("max_quote_age_s", "max_clock_skew_s", "heartbeat_timeout_s", "max_spread_pct"):
+        if getattr(market, key) <= 0:
+            raise PolicyError(f"market.{key} must be > 0")
     execution = ExecutionPolicy(
         **_decimals(
             ExecutionPolicy,
@@ -178,7 +212,15 @@ def load_policy(path: str | Path) -> Policy:
     )
     if execution.entry_time_in_force not in ("IOC", "GTC"):
         raise PolicyError("execution.entry_time_in_force must be IOC or GTC")
-    strategy = StrategyParams(**_decimals(StrategyParams, _section(raw, "strategy"), "strategy"))
+    strategy = StrategyParams(
+        **_decimals(
+            StrategyParams, _section(raw, "strategy"), "strategy", {k: PCT for k in ("min_edge_pct", "stop_pct", "target_pct")}
+        )  # fmt: skip
+    )
+    if not 0 < strategy.fast_window_s < strategy.slow_window_s:
+        raise PolicyError("strategy.fast_window_s must be > 0 and shorter than slow_window_s")
+    if strategy.stop_pct <= 0 or strategy.target_pct <= 0 or strategy.max_hold_s <= 0:
+        raise PolicyError("strategy stop_pct, target_pct and max_hold_s must be > 0")
     screening = ScreeningPolicy(
         **_decimals(
             ScreeningPolicy,
@@ -189,11 +231,21 @@ def load_policy(path: str | Path) -> Policy:
     )
     allow = []
     for entry in _section(raw, "allowlist").get("cex", []):
-        allow.append(CexMarketId(entry["venue"], entry["market_id"], entry["base_id"], entry["quote_id"]))
+        if set(entry) != {"venue", "market_id", "base_id", "quote_id"}:
+            raise PolicyError(f"allowlist entry must have exactly venue, market_id, base_id, quote_id: {entry}")
+        if entry["venue"] != "coinbase":
+            raise PolicyError(f"venue {entry['venue']!r} is not supported (coinbase only)")
+        market_id = CexMarketId(entry["venue"], entry["market_id"], entry["base_id"], entry["quote_id"])
+        if market_id in allow:
+            raise PolicyError(f"duplicate allowlist entry {market_id.key}")
+        allow.append(market_id)
+    unknown_members = seen_groups - {m.key for m in allow}
+    if unknown_members:
+        raise PolicyError(f"correlation group members not on the allowlist: {sorted(unknown_members)}")
     canonical = json.dumps(raw, sort_keys=True, default=str).encode()
     return Policy(
         mode=mode,
-        timezone=raw.get("timezone", "UTC"),
+        timezone=str(timezone),
         risk=risk,
         market=market,
         execution=execution,

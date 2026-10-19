@@ -178,8 +178,8 @@ def _holders(sink: FindingSink, data: dict, pool: PoolFacts | None, policy: Scre
     pools = {str(d.get("pair", "")).lower() for d in data.get("dex") or [] if isinstance(d, dict)}
     if pool is not None:
         pools.add(pool.pool_address.lower())
-    total = Decimal(0)
-    for h in holders[:10]:
+    counted = []
+    for h in holders:
         if not isinstance(h, dict):
             sink.unknown("holder_concentration", "malformed holder entry", ev)
             return
@@ -191,7 +191,9 @@ def _holders(sink: FindingSink, data: dict, pool: PoolFacts | None, policy: Scre
             return
         if locked or is_burn_address(address) or address in pools:
             continue
-        total += pct
+        counted.append(pct)
+    # Exclude pools/locks/burns first, then take the ten largest remaining holders.
+    total = sum(sorted(counted, reverse=True)[:10], Decimal(0))
     if total > policy.max_top10_holder_pct:
         sink.block("holder_concentration", f"top-10 non-pool holders own {total:.1%}", ev)
     else:

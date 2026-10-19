@@ -57,7 +57,7 @@ def chain_spec(chain: str) -> ChainSpec:
     return spec
 
 
-_EVM_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_EVM_RE = re.compile(r"^0x[0-9a-fA-F]{40}\Z")
 
 
 def _keccak_hex(data: bytes) -> str:
@@ -117,7 +117,7 @@ class DexAssetId:
         return chain_spec(self.chain)
 
 
-_MARKET_RE = re.compile(r"^[A-Z0-9]{2,15}-[A-Z0-9]{2,15}$")
+_MARKET_RE = re.compile(r"^[A-Z0-9]{2,15}-[A-Z0-9]{2,15}\Z")
 
 
 @dataclass(frozen=True)

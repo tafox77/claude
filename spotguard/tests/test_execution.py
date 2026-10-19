@@ -277,3 +277,54 @@ async def test_leader_lock_prevents_second_trader(tmp_path):
         b.acquire_leader()
     a.close()
     b.acquire_leader()
+
+
+# ----- regressions from the code review ------------------------------------------------------------
+
+
+async def test_entry_filled_via_reconcile_gets_protection_atomically(policy, tmp_path):
+    """Regression: an entry whose fill arrived through reconciliation had no stop or target."""
+    env = Env(policy, tmp_path, failures=[FailurePlan("timeout_after_accept", 1)])
+    cid = await env.orders.place(env.buy())
+    assert env.state(cid) is OrderState.UNKNOWN
+    await env.orders.reconcile(cid)
+    pos = env.store.positions()[BTC.key]
+    assert (pos.stop, pos.target) == (Decimal("99000"), Decimal("102000"))
+
+
+async def test_reentry_does_not_inherit_stale_protection(policy, tmp_path):
+    env = Env(policy, tmp_path)
+    await env.orders.place(env.buy())
+    env.refresh(bid="98900", ask="98910")
+    await env.sup.tick()  # stopped out
+    assert BTC.key not in env.store.positions()
+    env.refresh()
+    second = Intent(BTC.key, "buy", "entry", Decimal("0.004"), Decimal("100010"), "IOC", "t", policy.version,
+                    stop=Decimal("99500"), target=Decimal("101000"))  # fmt: skip
+    await env.orders.place(second)
+    pos = env.store.positions()[BTC.key]
+    assert (pos.stop, pos.target) == (Decimal("99500"), Decimal("101000"))
+
+
+async def test_wide_spread_does_not_block_stop_exit(policy, tmp_path):
+    """Regression: exits priced off the mid made a stop unsellable whenever the spread was wide."""
+    env = Env(policy, tmp_path)
+    await open_position(env)
+    env.refresh(bid="98800", ask="99800", depth=("1", "1", "1"))  # ~1% spread, bid below the stop
+    await env.sup.tick()
+    assert BTC.key not in env.store.positions()
+
+
+async def test_flatten_resolves_cancel_of_order_venue_never_received(policy, tmp_path):
+    """Regression: cancelling a never-received UNKNOWN order stuck in CANCEL_PENDING forever."""
+    env = Env(policy, tmp_path, failures=[FailurePlan("drop_before_accept", 1)])
+    cid = await env.orders.place(env.buy())
+    env.risk.request_flatten("tester", NOW)
+    await env.sup.tick()
+    assert env.orders.blocks_new_exposure()[0]  # pending cancel is as uncertain as UNKNOWN
+    env.clock.advance(31)
+    await env.sup.tick()
+    await env.sup.tick()
+    assert env.state(cid) is OrderState.REJECTED
+    assert not env.risk.state.flatten_requested
+    assert not env.store.query("SELECT 1 FROM alerts WHERE message LIKE 'illegal transition%'")

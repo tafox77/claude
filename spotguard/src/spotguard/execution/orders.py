@@ -82,9 +82,10 @@ class OrderManager:
         return self.store.orders_in((OrderState.UNKNOWN.value,))
 
     def blocks_new_exposure(self) -> tuple[bool, str]:
-        unknown = self.unknown_orders()
-        if unknown:
-            return True, f"{len(unknown)} order(s) in UNKNOWN state awaiting reconciliation"
+        # A cancel whose outcome isn't confirmed is as uncertain as an UNKNOWN order.
+        unsure = self.store.orders_in((OrderState.UNKNOWN.value, OrderState.CANCEL_PENDING.value))
+        if unsure:
+            return True, f"{len(unsure)} order(s) UNKNOWN or awaiting cancel confirmation"
         return False, ""
 
     def has_open_order(self, asset_key: str) -> bool:
@@ -107,6 +108,8 @@ class OrderManager:
                 "policy_version": intent.policy_version,
                 "model_version": intent.model_version,
                 "decision": json.dumps(intent.decision, default=str),
+                "stop": str(intent.stop) if intent.stop is not None else None,
+                "target": str(intent.target) if intent.target is not None else None,
             }
         )
         self.store.insert_order(
@@ -154,8 +157,12 @@ class OrderManager:
             if view is None:
                 age = (self.clock() - datetime.fromisoformat(row["created_at"])).total_seconds()
                 if age >= self.not_found_grace_s:
-                    # The venue has no record after the grace period: the order never arrived.
-                    self._move(cid, OrderState.REJECTED, "venue has no record of this client order id")
+                    # The venue has no record after the grace period. Without fills the order never arrived;
+                    # with fills already booked, the venue lost the remainder (e.g. a paper venue restart).
+                    if D(row["filled_qty"]) > 0:
+                        self._move(cid, OrderState.CANCELED, "venue has no record; remainder treated as canceled")
+                    else:
+                        self._move(cid, OrderState.REJECTED, "venue has no record of this client order id")
                 return OrderState(self.store.order(cid)["state"])
             self._absorb(cid, view)
             return OrderState(self.store.order(cid)["state"])

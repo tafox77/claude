@@ -126,3 +126,14 @@ def test_live_mode_blocked_without_approval(policy, tmp_path):
     live = dataclasses.replace(policy, mode="live")
     e = RiskEngine(live, Store(tmp_path / "db.sqlite"), NOW)
     assert not e.check_entry(req(), view()).approved
+
+
+def test_planned_risk_covers_a_clean_stop_out(policy, tmp_path):
+    """Regression: sizing allowed 0.3% for costs while a round trip costs 1.2% in fees alone."""
+    d = engine(policy, tmp_path).check_entry(req(stop="90000"), view())  # risk cap binds
+    qty, planned = d.qty, Decimal(d.details["planned_risk"])
+    fee = policy.execution.taker_fee_pct
+    exit_price = Decimal("90000") * (1 - policy.execution.max_exit_slippage_pct)
+    loss = qty * Decimal("100000") * (1 + fee) - qty * exit_price * (1 - fee)
+    assert planned >= loss
+    assert planned <= EQ * policy.risk.risk_per_trade_pct + Decimal("0.01")
